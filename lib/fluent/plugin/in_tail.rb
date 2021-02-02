@@ -39,6 +39,7 @@ module Fluent::Plugin
 
     RESERVED_CHARS = ['/', '*', '%'].freeze
 
+
     class WatcherSetupError < StandardError
       def initialize(msg)
         @message = msg
@@ -73,7 +74,7 @@ module Fluent::Plugin
     desc 'The cleanup interval of pos file'
     config_param :pos_file_compaction_interval, :time, default: nil
     desc 'Start to read the logs from the head of file, not bottom.'
-    config_param :read_from_head, :bool, default: false
+    config_param :read_from_head, :bool, default: true
     # When the program deletes log file and re-creates log file with same filename after passed refresh_interval,
     # in_tail may raise a pos_file related error. This is a known issue but there is no such program on production.
     # If we find such program / application, we will fix the problem.
@@ -345,6 +346,7 @@ module Fluent::Plugin
       existence_paths_hash = existence_path
 
       log.debug { "tailing paths: target = #{target_paths.join(",")} | existing = #{existence_paths.join(",")}" }
+      log.info { "PRATIBHA tailing paths: target = #{target_paths.join(",")} | existing = #{existence_paths.join(",")}" }
 
       unwatched_hash = existence_paths_hash.reject {|key, value| target_paths_hash.key?(key)}
       added_hash = target_paths_hash.reject {|key, value| existence_paths_hash.key?(key)}
@@ -364,6 +366,7 @@ module Fluent::Plugin
 
       if @enable_stat_watcher
         tt = StatWatcher.new(path, log) { tw.on_notify }
+        log.info { " PRATIBHA path #{path} log #{log} " }
         tw.register_watcher(tt)
       end
 
@@ -390,6 +393,7 @@ module Fluent::Plugin
       targets_info.each_value { |target_info|
         pe = nil
         if @pf
+          @log.info "PRATIBHA Position file exists"
           pe = @pf[target_info]
           if @read_from_head && pe.read_inode.zero?
             begin
@@ -407,9 +411,11 @@ module Fluent::Plugin
           next
         end
         target_info = TargetInfo.new(target_info.path, Fluent::FileWrapper.stat(target_info.path).ino)
+        log.info "PRATIBHA target_info #{target_info}, #{target_info.path},#{Fluent::FileWrapper.stat(target_info.path).ino}"
         @tails[target_info] = tw
       }
-    end
+      end
+
 
     def stop_watchers(targets_info, immediate: false, unwatched: false, remove_watcher: true)
       targets_info.each_value { |target_info|
@@ -440,7 +446,7 @@ module Fluent::Plugin
 
     # refresh_watchers calls @tails.keys so we don't use stop_watcher -> start_watcher sequence for safety.
     def update_watcher(target_info, pe)
-      log.info("detected rotation of #{target_info.path}; waiting #{@rotate_wait} seconds")
+      log.info("PRATIBHA detected rotation of #{target_info.path}; waiting #{@rotate_wait} seconds")
 
       if @pf
         pe_inode = pe.read_inode
@@ -452,8 +458,10 @@ module Fluent::Plugin
       end
 
       rotated_target_info = TargetInfo.new(target_info.path, pe.read_inode)
+      log.info "PRATIBHA rotated_target_info #{rotated_target_info}, path#{target_info.path}, inode#{pe.read_inode} "
       rotated_tw = @tails[rotated_target_info]
       new_target_info = target_info.dup
+      log.info "PRATIBHA new_target_info #{new_target_info}"
 
       if @follow_inodes
         new_position_entry = @pf[target_info]
@@ -670,6 +678,8 @@ module Fluent::Plugin
         @io_handler = nil
         @io_handler_build = io_handler_build
         @watchers = []
+        @maxfsize=-1
+        @@countonrotate=0
       end
 
       attr_reader :path, :ino
@@ -677,6 +687,7 @@ module Fluent::Plugin
       attr_reader :line_buffer_timer_flusher
       attr_accessor :unwatched  # This is used for removing position entry from PositionFile
       attr_reader :watchers
+      
 
       def tag
         @parsed_tag ||= @path.tr('/', '.').gsub(/\.+/, '.').gsub(/^\./, '')
@@ -701,12 +712,15 @@ module Fluent::Plugin
       def on_notify
         begin
           stat = Fluent::FileWrapper.stat(@path)
+          tmp=stat.inspect
+          @log.info "PRATIBHA first time on_notify #{tmp}"
         rescue Errno::ENOENT
           # moved or deleted
           stat = nil
         end
 
         @rotate_handler.on_notify(stat) if @rotate_handler
+        # coming as -1 always @log.info "PRATIBHA in on_notify #{@maxfsize}"
         @line_buffer_timer_flusher.on_notify(self) if @line_buffer_timer_flusher
         @io_handler.on_notify if @io_handler
       end
@@ -717,8 +731,12 @@ module Fluent::Plugin
             # first time
             fsize = stat.size
             inode = stat.ino
-
+            tmp=stat.inspect
             last_inode = @pe.read_inode
+            last_fsize = @pe.read_pos
+            @log.info "PRATIBHA on_rotate fsize #{last_fsize} "
+            @log.info "PRATIBHA last inode #{last_inode} "
+            @maxfsize=last_fsize
             if inode == last_inode
               # rotated file has the same inode number with the last file.
               # assuming following situation:
@@ -742,7 +760,9 @@ module Fluent::Plugin
               @pe.update(inode, pos)
             end
             @io_handler = io_handler
+            @log.info "PRATIBHA io_handler #{io_handler}"
           else
+            @log.info "PRATIBHA io_handler is nil"
             @io_handler = NullIOHandler.new
           end
         else
@@ -779,10 +799,12 @@ module Fluent::Plugin
               end
             end
           else
-            @log.info "detected rotation of #{@path}"
             @io_handler = io_handler
           end
         end
+            @countonrotate+=1
+            @log.info "PRATIBHA detected rotation of #{@path} times #{@countonrotate}}"
+            
       end
 
       def io_handler
@@ -868,7 +890,6 @@ module Fluent::Plugin
           @io = nil
           @notify_mutex = Mutex.new
           @log = log
-
           @log.info "following tail of #{@path}"
         end
 
@@ -878,6 +899,7 @@ module Fluent::Plugin
 
         def close
           if @io && !@io.closed?
+            @log.info "PRATIBHA io is close #{@io}"
             @io.close
             @io = nil
           end
@@ -909,6 +931,8 @@ module Fluent::Plugin
                 end
               end
 
+              stateoffile=Fluent::FileWrapper.stat(@path)
+              @log.info "PRATIBHA in handle_notify stat of file #{stateoffile.inspect}"
               unless @lines.empty?
                 if @receive_lines.call(@lines, @watcher)
                   @watcher.pe.update_pos(io.pos - @fifo.bytesize)
@@ -924,6 +948,7 @@ module Fluent::Plugin
         def open
           io = Fluent::FileWrapper.open(@path)
           io.seek(@watcher.pe.read_pos + @fifo.bytesize)
+          @log.info "PRATIBHA io is open #{io}"
           io
         rescue RangeError
           io.close if io
@@ -988,8 +1013,8 @@ module Fluent::Plugin
             inode = stat.ino
             fsize = stat.size
           end
-
           if @inode != inode || fsize < @fsize
+          @log.info "PRATIBHA on_notify state call prev inode #{@inode} current inode #{inode} prev fsize #{@fsize} current size #{fsize}"
             @on_rotate.call(stat)
           end
           @inode = inode
