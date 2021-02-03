@@ -217,7 +217,8 @@ module Fluent::Plugin
     def start
       super
 
-      if @pos_file
+        log.debug { "===> start started " }
+        if @pos_file
         pos_file_dir = File.dirname(@pos_file)
         FileUtils.mkdir_p(pos_file_dir, mode: @dir_perm) unless Dir.exist?(pos_file_dir)
         @pf_file = File.open(@pos_file, File::RDWR|File::CREAT|File::BINARY, @file_perm)
@@ -342,11 +343,11 @@ module Fluent::Plugin
     # In such case, you should separate log directory and specify two paths in path parameter.
     # e.g. path /path/to/dir/*,/path/to/rotated_logs/target_file
     def refresh_watchers
+      log.debug { "===> refresh_watchers started " }
       target_paths_hash = expand_paths
       existence_paths_hash = existence_path
 
       log.debug { "tailing paths: target = #{target_paths.join(",")} | existing = #{existence_paths.join(",")}" }
-      log.info { "PRATIBHA tailing paths: target = #{target_paths.join(",")} | existing = #{existence_paths.join(",")}" }
 
       unwatched_hash = existence_paths_hash.reject {|key, value| target_paths_hash.key?(key)}
       added_hash = target_paths_hash.reject {|key, value| existence_paths_hash.key?(key)}
@@ -356,17 +357,19 @@ module Fluent::Plugin
     end
 
     def setup_watcher(target_info, pe)
+      log.debug { "===> setup_watcher started " }
       line_buffer_timer_flusher = @multiline_mode ? TailWatcher::LineBufferTimerFlusher.new(log, @multiline_flush_interval, &method(:flush_buffer)) : nil
       tw = TailWatcher.new(target_info, pe, log, @read_from_head, @follow_inodes, method(:update_watcher), line_buffer_timer_flusher, method(:io_handler))
 
       if @enable_watch_timer
+        log.debug {"===> watcher timer enabled on log #{log}"}
         tt = TimerTrigger.new(1, log) { tw.on_notify }
         tw.register_watcher(tt)
       end
 
       if @enable_stat_watcher
+        log.debug {"===> inotify enabled on path #{path} log #{log}"}
         tt = StatWatcher.new(path, log) { tw.on_notify }
-        log.info { " PRATIBHA path #{path} log #{log} " }
         tw.register_watcher(tt)
       end
 
@@ -390,10 +393,11 @@ module Fluent::Plugin
     end
 
     def start_watchers(targets_info)
+      log.debug { "===> start_watchers started " }
       targets_info.each_value { |target_info|
         pe = nil
         if @pf
-          @log.info "PRATIBHA Position file exists"
+          @log.debug "===> Position file exists"
           pe = @pf[target_info]
           if @read_from_head && pe.read_inode.zero?
             begin
@@ -678,8 +682,8 @@ module Fluent::Plugin
         @io_handler = nil
         @io_handler_build = io_handler_build
         @watchers = []
-        @maxfsize=-1
-        @@countonrotate=0
+        @max_file_size=0
+        @@rotate_count=0
       end
 
       attr_reader :path, :ino
@@ -713,20 +717,22 @@ module Fluent::Plugin
         begin
           stat = Fluent::FileWrapper.stat(@path)
           tmp=stat.inspect
-          @log.info "PRATIBHA first time on_notify #{tmp}"
+          @log.debug "===> on_notify (TailWatcher) #{tmp}"
         rescue Errno::ENOENT
           # moved or deleted
           stat = nil
         end
 
         @rotate_handler.on_notify(stat) if @rotate_handler
-        # coming as -1 always @log.info "PRATIBHA in on_notify #{@maxfsize}"
         @line_buffer_timer_flusher.on_notify(self) if @line_buffer_timer_flusher
         @io_handler.on_notify if @io_handler
       end
 
       def on_rotate(stat)
+        @log.debug "===> on_rotate (TailWatcher) "
+
         if @io_handler.nil?
+          @log.debug "===> on_rotate (TailWatcher) @io_handler.nil"
           if stat
             # first time
             fsize = stat.size
@@ -734,9 +740,13 @@ module Fluent::Plugin
             tmp=stat.inspect
             last_inode = @pe.read_inode
             last_fsize = @pe.read_pos
-            @log.info "PRATIBHA on_rotate fsize #{last_fsize} "
-            @log.info "PRATIBHA last inode #{last_inode} "
-            @maxfsize=last_fsize
+
+            if last_fsize > @max_file_size
+              @log.debug "===> max_file_size updated from #{@max_file_size} to #{last_fsize}"
+              @max_file_size=last_fsize
+            end
+
+            @log.debug "===> on_rotate (TailWatcher) old-file inode #{last_inode}, fsize #{last_fsize} new-file #{inode}, fsize #{fsize}"
             if inode == last_inode
               # rotated file has the same inode number with the last file.
               # assuming following situation:
@@ -760,12 +770,12 @@ module Fluent::Plugin
               @pe.update(inode, pos)
             end
             @io_handler = io_handler
-            @log.info "PRATIBHA io_handler #{io_handler}"
           else
-            @log.info "PRATIBHA io_handler is nil"
+            @log.debug "===> on_rotate (TailWatcher) NullIOHandler.new"
             @io_handler = NullIOHandler.new
           end
         else
+          @log.debug "===> on_rotate (TailWatcher) else @io_handler.nil"
           watcher_needs_update = false
 
           if stat
@@ -802,9 +812,9 @@ module Fluent::Plugin
             @io_handler = io_handler
           end
         end
-            @countonrotate+=1
-            @log.info "PRATIBHA detected rotation of #{@path} times #{@countonrotate}}"
-            
+
+        @@rotate_count+=1
+        @log.debug "===> !!! New file rotation detected !!! (TailWatcher/on_rotate) ==>  #{@path} times #{@@rotate_count}"
       end
 
       def io_handler
@@ -899,7 +909,7 @@ module Fluent::Plugin
 
         def close
           if @io && !@io.closed?
-            @log.info "PRATIBHA io is close #{@io}"
+            @log.debug "===> IOHandler is closing #{@io}"
             @io.close
             @io = nil
           end
@@ -948,7 +958,7 @@ module Fluent::Plugin
         def open
           io = Fluent::FileWrapper.open(@path)
           io.seek(@watcher.pe.read_pos + @fifo.bytesize)
-          @log.info "PRATIBHA io is open #{io}"
+          @log.debug "===> IOHandler open #{io}"
           io
         rescue RangeError
           io.close if io
@@ -1006,6 +1016,7 @@ module Fluent::Plugin
         end
 
         def on_notify(stat)
+          @log.debug "===> RotateHandler on_notify started"
           if stat.nil?
             inode = nil
             fsize = 0
@@ -1014,7 +1025,7 @@ module Fluent::Plugin
             fsize = stat.size
           end
           if @inode != inode || fsize < @fsize
-          @log.info "PRATIBHA on_notify state call prev inode #{@inode} current inode #{inode} prev fsize #{@fsize} current size #{fsize}"
+            @log.debug "===> Change detected (RotateHandler) ==>  prev inode #{@inode}, current inode #{inode}, prev fsize #{@fsize}, current size #{fsize}"
             @on_rotate.call(stat)
           end
           @inode = inode
